@@ -58,7 +58,7 @@ class File:
 
   def get_path(self) -> str:
     parts = []
-    f = self
+    f: Optional[File] = self
     while f is not None:
       parts.append(f.name)
       f = f.parent
@@ -99,7 +99,7 @@ class File:
 class Filesystem:
   root: File
 
-  def __init__(self):
+  def __init__(self) -> None:
     self.root = File('', is_dir=True)
 
   def create_file(self, path: str) -> None:
@@ -144,7 +144,7 @@ class CodeownersPattern:
   _regex: re.Pattern
   _require_directory: bool
 
-  def __init__(self, pattern: str):
+  def __init__(self, pattern: str) -> None:
     self._pattern = pattern
     self._require_directory = False
 
@@ -191,10 +191,10 @@ class CodeownersPattern:
     else:
       return True
 
-  def __str__(self):
+  def __str__(self) -> str:
     return f'Pattern({self._pattern} => {self._regex.pattern})'
 
-  def __repr__(self):
+  def __repr__(self) -> str:
     return str(self)
 
 
@@ -212,7 +212,7 @@ class Codeowners:
 
   rules: List[CodeownersRule]
 
-  def __init__(self, path: Path):
+  def __init__(self, path: Path) -> None:
     self.rules = []
 
     with open(path) as f:
@@ -267,8 +267,8 @@ def main() -> None:
       f.set_owners(owners)
 
   for f in fs.find_ownership_roots():
-    owners = 'No codeowners set' if f.owners is None else ', '.join(f.owners)
-    print(f.get_path(), owners)
+    owner = 'No codeowners set' if f.owners is None else ', '.join(f.owners)
+    print(f.get_path(), owner)
 
 
 if __name__ == '__main__':
