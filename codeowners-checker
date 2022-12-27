@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+import argparse
+import dataclasses
+import io
+import os
+import re
+import subprocess
+from pathlib import Path
+from typing import Generator, List, Optional
+
+POSSIBLE_CODEOWNERS_FILE_DIRECTORIES: List[Path] = list(map(Path, ['.', '.github', 'docs']))
+
+
+class File:
+  name: str
+  is_dir: bool
+  parent: Optional['File']
+  children: List['File']
+
+  owners: Optional[List[str]]
+
+  def __init__(self, name: str, *, is_dir: bool = False):
+    if '/' in name:
+      raise ValueError(f'Name cannot contain "/", got {name!r}')
+    self.name = name
+    self.is_dir = is_dir
+    self.parent = None
+    self.children = []
+    self.owners = None
+
+  def add_child(self, child: 'File') -> None:
+    assert child.parent is None
+    assert len(child.children) == 0
+
+    # Parent the child.
+    child.parent = self
+    self.children.append(child)
+
+  def find_ownership_roots(self) -> Generator['File', None, None]:
+    if self.is_dir:
+      # If the whole subtree from myself down has a consistent owner, output this node and do not
+      # recurse further down this subtree.
+      if self.is_subtree_ownership_consistent():
+        yield self
+      else:
+        for child in sorted(self.children, key=lambda f: f.name):
+          yield from child.find_ownership_roots()
+    else:
+      # If we reached a regular file, our search was not pruned at a higher level, so we must
+      # have an distinct owner from our siblings.
+      yield self
+
+  def get_child(self, name: str) -> Optional['File']:
+    for child in self.children:
+      if child.name == name:
+        return child
+    return None
+
+  def get_path(self) -> str:
+    parts = []
+    f = self
+    while f is not None:
+      parts.append(f.name)
+      f = f.parent
+    parts.reverse()
+    return '/'.join(parts)
+
+  def is_subtree_ownership_consistent(self) -> bool:
+    # Prefer a BFS over a DFS (recursive) search here as its more likely that siblings will have
+    # different owners as opposed to descendants, allowing us to bail faster.
+    todo = [self]
+
+    while todo:
+      file = todo.pop(0)
+      if file.owners != self.owners:
+        return False
+      if file.is_dir:
+        for child in file.children:
+          todo.append(child)
+
+    return True
+
+  def set_owners(self, owners: List[str]) -> None:
+    self.owners = owners
+
+  def walk(self) -> Generator['File', None, None]:
+    yield self
+    if self.is_dir:
+      for child in self.children:
+        yield from child.walk()
+
+  def __str__(self) -> str:
+    return self.name
+
+  def __repr__(self) -> str:
+    return f'{self.__class__.__name__}(name={self.name!r}, is_dir={self.is_dir!r})'
+
+
+class Filesystem:
+  root: File
+
+  def __init__(self):
+    self.root = File('', is_dir=True)
+
+  def create_file(self, path: str) -> None:
+    if path.startswith('/'):
+      raise ValueError(f'Provided path value must not start with a directory separator(got {path!r})')
+    if path.endswith('/'):
+      raise ValueError(f'Provided path value must not end in a directory separator (got {path!r})')
+
+    # Upsert the directory structure until the file.
+    # This is essentially doing a `mkdir -p`.
+    d = self.root
+    parts = path.split('/')
+    while len(parts) != 1:
+      part = parts.pop(0)
+
+      next_d = d.get_child(part)
+      if next_d is None:
+        next_d = File(part, is_dir=True)
+        d.add_child(next_d)
+      elif not next_d.is_dir:
+        raise Exception(f'Looking up {part!r} of {path!r} and found something that is not a directory. This should not happen.')
+
+      d = next_d
+
+    # Create the file.
+    part = parts[0]
+    f = d.get_child(part)
+    if f is not None:
+      raise Exception(f'Looking up {part!r} of {path!r} and found that it already exists. This should not happen.')
+    f = File(part)
+    d.add_child(f)
+
+  def find_ownership_roots(self) -> Generator['File', None, None]:
+    yield from self.root.find_ownership_roots()
+
+  def walk(self) -> Generator[File, None, None]:
+    yield from self.root.walk()
+
+
+class CodeownersPattern:
+  _pattern: str
+  _regex: re.Pattern
+  _require_directory: bool
+
+  def __init__(self, pattern: str):
+    self._pattern = pattern
+    self._require_directory = False
+
+    # There is an implicit globstar at the start if no alternative is specified.
+    if not pattern.startswith('/') and not pattern.startswith('**'):
+      pattern = '**/' + pattern
+    pattern = pattern.lstrip('/')
+
+    # A trailing slash indicates the matching node must be a directory.
+    if pattern.endswith('/'):
+      self._require_directory = True
+      pattern = pattern.rstrip('/')
+
+    regex = io.StringIO()
+    regex.write('^')
+    prev_wrote_slash = False
+    for part in pattern.split('/'):
+      if not prev_wrote_slash:
+        regex.write('/')
+      prev_wrote_slash = False
+
+      if part == '':
+        pass
+      elif part == '**':
+        regex.write(r'([^/]+/)*')
+        prev_wrote_slash = True
+      else:
+        for c in part:
+          if c == '*':
+            regex.write(r'[^/]*')
+          elif c == '?':
+            regex.write(r'[^/]')
+          else:
+            regex.write(re.escape(c))
+
+    self._regex = re.compile(regex.getvalue())
+
+  def matches(self, file: File) -> bool:
+    m = self._regex.match(file.get_path())
+    if m is None:
+      return False
+    elif self._require_directory and not file.is_dir:
+      return False
+    else:
+      return True
+
+  def __str__(self):
+    return f'Pattern({self._pattern} => {self._regex.pattern})'
+
+  def __repr__(self):
+    return str(self)
+
+
+@dataclasses.dataclass
+class CodeownersRule:
+  pattern: CodeownersPattern
+  owners: List[str]
+
+  def matches(self, file: File) -> bool:
+    return self.pattern.matches(file)
+
+
+class Codeowners:
+  RE_COMMENT = re.compile(r'#.*')
+
+  rules: List[CodeownersRule]
+
+  def __init__(self, path: Path):
+    self.rules = []
+
+    with open(path) as f:
+      for n, line in enumerate(f, start=1):
+        # Strip comments.
+        line = self.RE_COMMENT.sub('', line).strip()
+        if not line:
+          continue
+
+        parts = line.split()
+        rule = CodeownersRule(pattern=CodeownersPattern(parts[0]), owners=parts[1:])
+        self.rules.append(rule)
+
+  def get_codeowner(self, file: File) -> Optional[List[str]]:
+    # Order is important; the last matching pattern takes the most precedence.
+    matched_rule = None
+    for rule in self.rules:
+      if rule.matches(file):
+        matched_rule = rule
+
+    return None if matched_rule is None else matched_rule.owners
+
+
+def load_codeowners_file() -> Codeowners:
+  # Attempt to locate the GitHub codeowners file.
+  for d in POSSIBLE_CODEOWNERS_FILE_DIRECTORIES:
+    path = d / 'CODEOWNERS'
+    if path.exists():
+      break
+  else:
+    raise Exception('Failed to find CODEOWNERS file.')
+
+  return Codeowners(path)
+
+
+def find_comitted_paths() -> List[str]:
+  output = subprocess.check_output(['git', 'ls-files'])
+  output = output.decode().replace('\r', '').strip()
+  return output.split('\n')
+
+
+def main() -> None:
+  codeowners = load_codeowners_file()
+
+  fs = Filesystem()
+  for path in find_comitted_paths():
+    fs.create_file(path)
+
+  for f in fs.walk():
+    owners = codeowners.get_codeowner(f)
+    if owners is not None:
+      f.set_owners(owners)
+
+  for f in fs.find_ownership_roots():
+    owners = 'No codeowners set' if f.owners is None else ', '.join(f.owners)
+    print(f.get_path(), owners)
+
+
+if __name__ == '__main__':
+  parser = argparse.ArgumentParser(description='Finds file paths that do not have explicit codeowners set..')
+  parser.add_argument('-p', '--path', required=True, help='Path to the git repository to check codeowners for.')
+  args = parser.parse_args()
+
+  os.chdir(args.path)
+
+  main()
