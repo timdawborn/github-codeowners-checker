@@ -2,14 +2,25 @@
 Simple script for outputting the codeowners for every ownership root in a git repository using the rules in the GitHub codeowners file.
 
 Help / usage:
-```bash
+```
 $ ./github-codeowners-checker --help
+usage: github-codeowners-checker [-h] -i INPUT [-I] [-o OUTPUT] [-f {txt,csv}]
+
+Finds file paths that do not have explicit codeowners set..
+
+options:
+  -h, --help            show this help message and exit
+  -i INPUT, --input INPUT
+                        Path to the git repository to check codeowners for.
+  -I, --ignore-default-codeowners
+                        Whether default codeowner rules (`*`) should be ignored.
+  -o OUTPUT, --output OUTPUT
+                        Path to write the results to. Defaults to stdout.
+  -f {txt,csv}, --output-format {txt,csv}
+                        How the output should be formatted.
 ```
 
-Usage:
-```bash
-$ ./github-codeowners-checker -p <path-to-repository-root>
+Minimal invocation:
 ```
-
-You can also tell the ownership checker to ignore the default codeowner rule (`*`) if it exists via the `-i` flag.
-This is useful if you want to see what the ownership model is without considering default owners.
+$ ./github-codeowners-checker -i <path-to-repository-root>
+```

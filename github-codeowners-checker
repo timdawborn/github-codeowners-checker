@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 import argparse
-import dataclasses
+import csv
 import io
 import os
 import re
 import subprocess
+from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Generator, List, Optional
+from typing import Generator, List, Optional, TYPE_CHECKING, TextIO
 
 POSSIBLE_CODEOWNERS_FILE_DIRECTORIES: List[Path] = list(map(Path, ['.', '.github', 'docs']))
+
+if TYPE_CHECKING:
+  import _csv
 
 
 class File:
@@ -143,11 +147,11 @@ class Filesystem:
 
 
 class CodeownersPattern:
-  _pattern: str
-  _regex: re.Pattern
+  pattern: str
+  regex: re.Pattern
 
   def __init__(self, pattern: str) -> None:
-    self._pattern = pattern
+    self.pattern = pattern
 
     # There is an implicit globstar at the start if no alternative is specified.
     if not pattern.startswith('/') and not pattern.startswith('**'):
@@ -185,23 +189,26 @@ class CodeownersPattern:
     if require_directory:
       regex.write('($|/)')
 
-    self._regex = re.compile(regex.getvalue())
+    self.regex = re.compile(regex.getvalue())
 
   def matches(self, file: File) -> bool:
-    m = self._regex.match(file.get_path())
+    m = self.regex.match(file.get_path())
     return m is not None
 
   def __str__(self) -> str:
-    return f'Pattern({self._pattern} => {self._regex.pattern})'
+    return f'Pattern({self.pattern} => {self.regex.pattern})'
 
   def __repr__(self) -> str:
     return str(self)
 
 
-@dataclasses.dataclass
 class CodeownersRule:
   pattern: CodeownersPattern
   owners: List[str]
+
+  def __init__(self, pattern: CodeownersPattern, owners: List[str]) -> None:
+    self.pattern = pattern
+    self.owners = owners
 
   def matches(self, file: File) -> bool:
     return self.pattern.matches(file)
@@ -238,6 +245,52 @@ class Codeowners:
     return None if matched_rule is None else matched_rule.owners
 
 
+class OutputFormatter(ABC):
+  output_file: TextIO
+
+  def __init__(self, output_file: TextIO) -> None:
+    self.output_file = output_file
+
+  @abstractmethod
+  def write_result(self, file: File) -> None:
+    pass
+
+
+class CsvOutputFormatter(OutputFormatter):
+  writer: '_csv._writer'
+
+  def __init__(self, output_file: TextIO) -> None:
+    super().__init__(output_file)
+    self.writer = csv.writer(self.output_file)
+    self.writer.writerow(['File path', 'Has codeowners defined?', 'Codeowners'])
+
+  def write_result(self, file: File) -> None:
+    row = [file.get_path()]
+    if file.owners is None:
+      row.append('False')
+    else:
+      row.append('True')
+      row.extend(sorted(file.owners))
+    self.writer.writerow(row)
+
+
+class TxtOutputFormatter(OutputFormatter):
+  def write_result(self, file: File) -> None:
+    if file.owners is None:
+      ownership = 'No codeowners.'
+    elif len(file.owners) == 0:
+      ownership = 'Explicitly no codeowners set.'
+    else:
+      ownership = ', '.join(sorted(file.owners))
+    print(f'{file.get_path()}: {ownership}')
+
+
+OUTPUT_FORMATTERS = {
+  'csv': CsvOutputFormatter,
+  'txt': TxtOutputFormatter,
+}
+
+
 def load_codeowners_file(ignore_default_codeowners: bool) -> Codeowners:
   # Attempt to locate the GitHub codeowners file.
   for d in POSSIBLE_CODEOWNERS_FILE_DIRECTORIES:
@@ -251,12 +304,14 @@ def load_codeowners_file(ignore_default_codeowners: bool) -> Codeowners:
 
 
 def find_comitted_paths() -> List[str]:
-  output = subprocess.check_output(['git', 'ls-files'])
-  output = output.decode().replace('\r', '').strip()
-  return output.split('\n')
+  output = subprocess.check_output(['git', 'ls-files'], text=True)
+  return output.strip().split('\n')
 
 
-def main(ignore_default_codeowners: bool) -> None:
+def main(
+    ignore_default_codeowners: bool,
+    output_formatter: OutputFormatter,
+) -> None:
   codeowners = load_codeowners_file(ignore_default_codeowners)
 
   fs = Filesystem()
@@ -269,21 +324,25 @@ def main(ignore_default_codeowners: bool) -> None:
       f.set_owners(owners)
 
   for f in fs.find_ownership_roots():
-    if f.owners is None:
-      ownership = 'No codeowners'
-    elif len(f.owners) == 0:
-      ownership = 'Explicitly no owners set'
-    else:
-      ownership = ', '.join(sorted(f.owners))
-    print(f.get_path(), ownership)
+    output_formatter.write_result(f)
 
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(description='Finds file paths that do not have explicit codeowners set..')
-  parser.add_argument('-p', '--path', required=True, help='Path to the git repository to check codeowners for.')
-  parser.add_argument('-i', '--ignore-default-codeowners', action='store_true', help='Whether default codeowner rules (`*`) should be ignored.')
+  parser.add_argument('-i', '--input', required=True, help='Path to the git repository to check codeowners for.')
+  parser.add_argument('-I', '--ignore-default-codeowners', action='store_true', help='Whether default codeowner rules (`*`) should be ignored.')
+  parser.add_argument('-o', '--output', default='/dev/stdout', help='Path to write the results to. Defaults to stdout.')
+  parser.add_argument('-f', '--output-format', choices=['txt', 'csv'], default='txt', help='How the output should be formatted.')
   args = parser.parse_args()
 
-  os.chdir(args.path)
+  # Change directory to the git repository.
+  os.chdir(args.input)
 
-  main(args.ignore_default_codeowners)
+  # Open the output file for writing.
+  with open(args.output, 'w') as fout:
+    # Construct the desired output formatter.
+    klass = OUTPUT_FORMATTERS[args.output_format]
+    output_formatter = klass(fout)
+
+    # Kick off the main logic.
+    main(args.ignore_default_codeowners, output_formatter)
