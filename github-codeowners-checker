@@ -57,7 +57,7 @@ class File:
     return None
 
   def get_path(self) -> str:
-    parts = []
+    parts: List[str] = []
     f: Optional[File] = self
     while f is not None:
       parts.append(f.name)
@@ -82,6 +82,9 @@ class File:
 
   def set_owners(self, owners: List[str]) -> None:
     self.owners = owners
+    if self.is_dir:
+      for child in self.children:
+        child.set_owners(owners)
 
   def walk(self) -> Generator['File', None, None]:
     yield self
@@ -142,11 +145,9 @@ class Filesystem:
 class CodeownersPattern:
   _pattern: str
   _regex: re.Pattern
-  _require_directory: bool
 
   def __init__(self, pattern: str) -> None:
     self._pattern = pattern
-    self._require_directory = False
 
     # There is an implicit globstar at the start if no alternative is specified.
     if not pattern.startswith('/') and not pattern.startswith('**'):
@@ -154,8 +155,9 @@ class CodeownersPattern:
     pattern = pattern.lstrip('/')
 
     # A trailing slash indicates the matching node must be a directory.
+    require_directory = False
     if pattern.endswith('/'):
-      self._require_directory = True
+      require_directory = True
       pattern = pattern.rstrip('/')
 
     regex = io.StringIO()
@@ -180,16 +182,14 @@ class CodeownersPattern:
           else:
             regex.write(re.escape(c))
 
+    if require_directory:
+      regex.write('($|/)')
+
     self._regex = re.compile(regex.getvalue())
 
   def matches(self, file: File) -> bool:
     m = self._regex.match(file.get_path())
-    if m is None:
-      return False
-    elif self._require_directory and not file.is_dir:
-      return False
-    else:
-      return True
+    return m is not None
 
   def __str__(self) -> str:
     return f'Pattern({self._pattern} => {self._regex.pattern})'
@@ -212,7 +212,7 @@ class Codeowners:
 
   rules: List[CodeownersRule]
 
-  def __init__(self, path: Path) -> None:
+  def __init__(self, path: Path, *, ignore_default_codeowners: bool = False) -> None:
     self.rules = []
 
     with open(path) as f:
@@ -222,11 +222,13 @@ class Codeowners:
         if not line:
           continue
 
-        parts = line.split()
-        rule = CodeownersRule(pattern=CodeownersPattern(parts[0]), owners=parts[1:])
+        pattern, *owners = line.split()
+        if pattern == '*' and ignore_default_codeowners:
+          continue
+        rule = CodeownersRule(pattern=CodeownersPattern(pattern), owners=owners)
         self.rules.append(rule)
 
-  def get_codeowner(self, file: File) -> Optional[List[str]]:
+  def get_codeowners(self, file: File) -> Optional[List[str]]:
     # Order is important; the last matching pattern takes the most precedence.
     matched_rule = None
     for rule in self.rules:
@@ -236,7 +238,7 @@ class Codeowners:
     return None if matched_rule is None else matched_rule.owners
 
 
-def load_codeowners_file() -> Codeowners:
+def load_codeowners_file(ignore_default_codeowners: bool) -> Codeowners:
   # Attempt to locate the GitHub codeowners file.
   for d in POSSIBLE_CODEOWNERS_FILE_DIRECTORIES:
     path = d / 'CODEOWNERS'
@@ -245,7 +247,7 @@ def load_codeowners_file() -> Codeowners:
   else:
     raise Exception('Failed to find CODEOWNERS file.')
 
-  return Codeowners(path)
+  return Codeowners(path, ignore_default_codeowners=ignore_default_codeowners)
 
 
 def find_comitted_paths() -> List[str]:
@@ -254,28 +256,34 @@ def find_comitted_paths() -> List[str]:
   return output.split('\n')
 
 
-def main() -> None:
-  codeowners = load_codeowners_file()
+def main(ignore_default_codeowners: bool) -> None:
+  codeowners = load_codeowners_file(ignore_default_codeowners)
 
   fs = Filesystem()
   for path in find_comitted_paths():
     fs.create_file(path)
 
   for f in fs.walk():
-    owners = codeowners.get_codeowner(f)
+    owners = codeowners.get_codeowners(f)
     if owners is not None:
       f.set_owners(owners)
 
   for f in fs.find_ownership_roots():
-    owner = 'No codeowners set' if f.owners is None else ', '.join(f.owners)
-    print(f.get_path(), owner)
+    if f.owners is None:
+      ownership = 'No codeowners'
+    elif len(f.owners) == 0:
+      ownership = 'Explicitly no owners set'
+    else:
+      ownership = ', '.join(sorted(f.owners))
+    print(f.get_path(), ownership)
 
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser(description='Finds file paths that do not have explicit codeowners set..')
   parser.add_argument('-p', '--path', required=True, help='Path to the git repository to check codeowners for.')
+  parser.add_argument('-i', '--ignore-default-codeowners', action='store_true', help='Whether default codeowner rules (`*`) should be ignored.')
   args = parser.parse_args()
 
   os.chdir(args.path)
 
-  main()
+  main(args.ignore_default_codeowners)
