@@ -22,5 +22,5 @@ options:
 
 Minimal invocation:
 ```
-$ ./github-codeowners-checker -i <path-to-repository-root>
+$ python3 github-codeowners-checker.py -i <path-to-repository-root>
 ```
