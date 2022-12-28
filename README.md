@@ -3,7 +3,7 @@ Simple script for outputting the codeowners for every ownership root in a git re
 
 Help / usage:
 ```
-$ ./github-codeowners-checker --help
+$ ./github-codeowners-checker.py --help
 usage: github-codeowners-checker.py [-h] -i INPUT [-I] [-o OUTPUT] [-f {txt,csv}] [-p {ownership-roots,all}]
 
 Finds file paths that do not have explicit codeowners set..
@@ -24,5 +24,5 @@ options:
 
 Minimal invocation:
 ```
-$ python3 github-codeowners-checker.py -i <path-to-repository-root>
+$ ./github-codeowners-checker.py -i <path-to-repository-root>
 ```
