@@ -9,5 +9,5 @@ install_deps: .venv
 	-./.venv/bin/python -m pip install -r requirements.development.txt
 
 lint: .venv
-	-./.venv/bin/python -m flake8 github-codeowners-checker
-	-./.venv/bin/python -m mypy github-codeowners-checker
+	-./.venv/bin/python -m flake8 github-codeowners-checker.py
+	-./.venv/bin/python -m mypy github-codeowners-checker.py

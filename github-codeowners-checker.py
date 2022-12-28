@@ -245,7 +245,7 @@ class Codeowners:
     return None if matched_rule is None else matched_rule.owners
 
 
-class OutputFormatter(ABC):
+class ResultFormatter(ABC):
   output_file: TextIO
 
   def __init__(self, output_file: TextIO) -> None:
@@ -256,7 +256,7 @@ class OutputFormatter(ABC):
     pass
 
 
-class CsvOutputFormatter(OutputFormatter):
+class CsvResultFormatter(ResultFormatter):
   writer: '_csv._writer'
 
   def __init__(self, output_file: TextIO) -> None:
@@ -274,7 +274,7 @@ class CsvOutputFormatter(OutputFormatter):
     self.writer.writerow(row)
 
 
-class TxtOutputFormatter(OutputFormatter):
+class TxtResultFormatter(ResultFormatter):
   def write_result(self, file: File) -> None:
     if file.owners is None:
       ownership = 'No codeowners.'
@@ -285,9 +285,42 @@ class TxtOutputFormatter(OutputFormatter):
     print(f'{file.get_path()}: {ownership}')
 
 
-OUTPUT_FORMATTERS = {
-  'csv': CsvOutputFormatter,
-  'txt': TxtOutputFormatter,
+RESULT_FORMATTERS = {
+  'csv': CsvResultFormatter,
+  'txt': TxtResultFormatter,
+}
+
+
+class ResultGenerator(ABC):
+  fs: Filesystem
+  result_formatter: ResultFormatter
+
+  def __init__(self, fs: Filesystem, result_formatter: ResultFormatter) -> None:
+    self.fs = fs
+    self.result_formatter = result_formatter
+
+  @abstractmethod
+  def generate_files(self) -> Generator[File, None, None]:
+    pass
+
+  def write_results(self) -> None:
+    for file in self.generate_files():
+      self.result_formatter.write_result(file)
+
+
+class AllFilesResultGenerator(ResultGenerator):
+  def generate_files(self) -> Generator[File, None, None]:
+    yield from self.fs.walk()
+
+
+class OwnershipRootsResultGenerator(ResultGenerator):
+  def generate_files(self) -> Generator[File, None, None]:
+    yield from self.fs.find_ownership_roots()
+
+
+RESULT_GENERATORS = {
+  'all': AllFilesResultGenerator,
+  'ownership-roots': OwnershipRootsResultGenerator,
 }
 
 
@@ -308,23 +341,21 @@ def find_comitted_paths() -> List[str]:
   return output.strip().split('\n')
 
 
-def main(
-    ignore_default_codeowners: bool,
-    output_formatter: OutputFormatter,
-) -> None:
+def main(ignore_default_codeowners: bool, fs: Filesystem, result_generator: ResultGenerator) -> None:
   codeowners = load_codeowners_file(ignore_default_codeowners)
 
-  fs = Filesystem()
+  # Load all of the paths in git into the virtual file system.
   for path in find_comitted_paths():
     fs.create_file(path)
 
+  # For each node in the file system, assign it its codeowners.
   for f in fs.walk():
     owners = codeowners.get_codeowners(f)
     if owners is not None:
       f.set_owners(owners)
 
-  for f in fs.find_ownership_roots():
-    output_formatter.write_result(f)
+  # Output the results.
+  result_generator.write_results()
 
 
 if __name__ == '__main__':
@@ -333,6 +364,7 @@ if __name__ == '__main__':
   parser.add_argument('-I', '--ignore-default-codeowners', action='store_true', help='Whether default codeowner rules (`*`) should be ignored.')
   parser.add_argument('-o', '--output', default='/dev/stdout', help='Path to write the results to. Defaults to stdout.')
   parser.add_argument('-f', '--output-format', choices=['txt', 'csv'], default='txt', help='How the output should be formatted.')
+  parser.add_argument('-p', '--output-paths', choices=['ownership-roots', 'all'], default='ownership-roots', help='Whether all paths should be output with their codeowners, or whether to only output each root (not recursing further when all subnodes have the same ownership).')
   args = parser.parse_args()
 
   # Change directory to the git repository.
@@ -340,9 +372,11 @@ if __name__ == '__main__':
 
   # Open the output file for writing.
   with open(args.output, 'w') as fout:
-    # Construct the desired output formatter.
-    klass = OUTPUT_FORMATTERS[args.output_format]
-    output_formatter = klass(fout)
+    fs = Filesystem()
+
+    # Construct the desired output formatter and output generator.
+    result_formatter = RESULT_FORMATTERS[args.output_format](fout)
+    result_generator = RESULT_GENERATORS[args.output_paths](fs, result_formatter)
 
     # Kick off the main logic.
-    main(args.ignore_default_codeowners, output_formatter)
+    main(args.ignore_default_codeowners, fs, result_generator)
